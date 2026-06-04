@@ -1,0 +1,6 @@
+node_modules/
+dist/
+*.json.bak
+pyxis.json
+.DS_Store
+*.db

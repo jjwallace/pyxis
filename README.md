@@ -1,5 +1,7 @@
 # Pyxis
 
+![Pyxis](public/title.jpeg)
+
 **Semantic router built on real embeddings + hybrid BM25/vector search.**
 
 Named after *Pyxis* — the mariner's compass constellation. Navigate your docs, rules, and commands by meaning, not keywords.

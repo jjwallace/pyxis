@@ -2,20 +2,51 @@
 
 ![Pyxis](public/title.jpeg)
 
-**Semantic router built on real embeddings + hybrid BM25/vector search.**
+**Semantic code + doc router built on real embeddings, HNSW vector search, and AST code parsing.**
 
-Named after *Pyxis* — the mariner's compass constellation. Navigate your docs, rules, and commands by meaning, not keywords.
+Named after *Pyxis* — the mariner's compass constellation. Navigate your codebase, docs, rules, and commands by meaning, not keywords.
 
 ## What makes it different
 
-| | Pyxis | Typical semantic router |
+| | Pyxis | Bloop / typical router |
 |---|---|---|
-| Embeddings | Nomic Embed v2 (MTEB ~62) | all-MiniLM-L6-v2 (MTEB ~56) or hash mocks |
+| Embeddings | Nomic Embed v2 (MTEB ~62) | MiniLM (MTEB ~56) or hash mocks |
+| Code parsing | TypeScript Compiler API + regex (Rust) | TreeSitter |
+| Vector search | HNSW via usearch (O log n) | Brute force or trigram |
 | Fulltext | BM25 via MiniSearch | None or basic keyword |
 | Hybrid scoring | Weighted vector + BM25 merge | Vector only |
-| Persistence | JSON on disk, loads instantly | Rebuild from scratch each run |
+| Persistence | JSON on disk, loads instantly | Rebuild from scratch |
+| Cross-repo | Single unified index | Per-repo |
 | Incremental updates | `removeByPath` + re-add | Full reindex |
-| Parallel indexing | `addMany` embeds concurrently | Sequential |
+| Parallel indexing | `addMany` concurrently | Sequential |
+
+## Code indexing
+
+```typescript
+import { Pyxis, createEmbedFn, indexCode, indexFiles } from 'pyxis'
+
+const embed = await createEmbedFn()
+const router = new Pyxis(embed, { dbPath: './pyxis.json' })
+await router.init()
+
+// Index source code — extracts functions, classes, interfaces, types, structs
+// Each symbol gets its own route with a line number in the path
+const code = await indexCode('./src', {
+  languages: ['typescript', 'rust'],  // default: all
+  rootDir: '.',                        // for relative paths
+  metadata: { project: 'my-app' },
+})
+
+// Index docs alongside code
+const docs = await indexFiles('./docs', { type: 'doc' })
+
+await router.addMany([...code, ...docs])
+await router.save()
+
+// Find code by meaning — returns path:line so you can jump directly
+const results = await router.query('JWT authentication middleware')
+// → [{ route: { name: 'authenticate', path: 'src/auth.ts:45', ... }, score: 0.94 }]
+```
 
 ## Install
 

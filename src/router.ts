@@ -8,7 +8,7 @@ const DEFAULT_VECTOR_WEIGHT = 0.7
 const DEFAULT_FULLTEXT_WEIGHT = 0.3
 
 interface StoredRoute extends Route {
-  id: string
+  id: number
   embedding: number[]
 }
 
@@ -17,23 +17,14 @@ interface PersistedIndex {
   routes: StoredRoute[]
 }
 
-function cosine(a: number[], b: number[]): number {
-  let dot = 0, magA = 0, magB = 0
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i]
-    magA += a[i] * a[i]
-    magB += b[i] * b[i]
-  }
-  const denom = Math.sqrt(magA) * Math.sqrt(magB)
-  return denom === 0 ? 0 : dot / denom
-}
-
 export class Pyxis {
   private embedFn: EmbedFn
   private config: Required<PyxisConfig>
   private routes: StoredRoute[] = []
   private fts: MiniSearch<StoredRoute>
+  private hnsw: any = null
   private nextId = 0
+  private dimensions = 768
 
   constructor(embedFn: EmbedFn, config: PyxisConfig = {}) {
     this.embedFn = embedFn
@@ -50,39 +41,61 @@ export class Pyxis {
     })
   }
 
-  /** Load persisted index from disk, or start fresh. */
+  private async buildHnsw(): Promise<void> {
+    const { Index, MetricKind, ScalarKind } = await import('usearch')
+    this.hnsw = new Index(this.dimensions, MetricKind.Cos, ScalarKind.F32, 16)
+    for (const r of this.routes) {
+      this.hnsw.add(BigInt(r.id), new Float32Array(r.embedding))
+    }
+  }
+
   async init(): Promise<void> {
     if (!existsSync(this.config.dbPath)) return
     try {
       const raw = await readFile(this.config.dbPath, 'utf-8')
       const data: PersistedIndex = JSON.parse(raw)
       this.routes = data.routes ?? []
-      this.nextId = this.routes.length
+      this.nextId = this.routes.length > 0
+        ? Math.max(...this.routes.map(r => r.id)) + 1
+        : 0
       if (this.routes.length > 0) {
-        this.fts.addAll(this.routes)
+        if (this.routes[0].embedding) {
+          this.dimensions = this.routes[0].embedding.length
+        }
+        this.fts.addAll(this.routes.map(r => ({ ...r, id: String(r.id) })) as any)
+        await this.buildHnsw()
       }
     } catch {
       // corrupt or missing — start fresh
     }
   }
 
-  /** Persist the current index to disk. */
   async save(): Promise<void> {
-    const data: PersistedIndex = { version: 1, routes: this.routes }
+    const data: PersistedIndex = { version: 2, routes: this.routes }
     await writeFile(this.config.dbPath, JSON.stringify(data), 'utf-8')
   }
 
   async add(route: Route): Promise<void> {
     const embedding = await this.embedFn(`${route.name} ${route.description}`)
-    const id = String(this.nextId++)
+    this.dimensions = embedding.length
+    const id = this.nextId++
     const stored: StoredRoute = { ...route, id, embedding }
     this.routes.push(stored)
-    this.fts.add(stored)
+    this.fts.add({ ...stored, id: String(id) } as any)
+
+    // Rebuild HNSW — usearch doesn't support incremental add after construction
+    // For small batches this is fast; addMany rebuilds once after all adds
+    this._hnswDirty = true
   }
 
+  private _hnswDirty = false
+
   async addMany(routes: Route[]): Promise<void> {
-    // Embed in parallel — Transformers.js v3 handles batching internally
     await Promise.all(routes.map(r => this.add(r)))
+    if (this._hnswDirty) {
+      await this.buildHnsw()
+      this._hnswDirty = false
+    }
   }
 
   async query(text: string, options: QueryOptions = {}): Promise<SearchResult[]> {
@@ -95,30 +108,51 @@ export class Pyxis {
 
     if (candidates.length === 0) return []
 
-    // Vector scores
-    const vectorScores = new Map<string, number>()
+    const candidateIds = new Set(candidates.map(r => r.id))
+
+    // Vector scores via HNSW (O(log n)) or brute force fallback
+    const vectorScores = new Map<number, number>()
     if (mode !== 'fulltext') {
       const queryEmbedding = await this.embedFn(text)
-      for (const r of candidates) {
-        vectorScores.set(r.id, cosine(queryEmbedding, r.embedding))
+
+      if (this.hnsw && candidates.length === this.routes.length) {
+        // Fast HNSW path — search top-k candidates
+        const k = Math.min(limit * 4, this.routes.length)
+        const results = this.hnsw.search(new Float32Array(queryEmbedding), k)
+        for (let i = 0; i < results.keys.length; i++) {
+          const id = Number(results.keys[i])
+          // usearch cos metric returns distance (0=identical), convert to similarity
+          vectorScores.set(id, 1 - results.distances[i])
+        }
+      } else {
+        // Filtered subset — brute force only over candidates (still O(n_candidates))
+        const qv = new Float32Array(queryEmbedding)
+        for (const r of candidates) {
+          const rv = new Float32Array(r.embedding)
+          let dot = 0, magA = 0, magB = 0
+          for (let i = 0; i < qv.length; i++) {
+            dot += qv[i] * rv[i]; magA += qv[i] * qv[i]; magB += rv[i] * rv[i]
+          }
+          const denom = Math.sqrt(magA) * Math.sqrt(magB)
+          vectorScores.set(r.id, denom === 0 ? 0 : dot / denom)
+        }
       }
     }
 
-    // Fulltext scores (BM25 via MiniSearch)
-    const ftScores = new Map<string, number>()
+    // BM25 via MiniSearch
+    const ftScores = new Map<number, number>()
     if (mode !== 'vector') {
       const ftResults = this.fts.search(text)
       const maxScore = ftResults[0]?.score ?? 1
       for (const r of ftResults) {
-        ftScores.set(String(r.id), r.score / maxScore)
+        const id = Number(r.id)
+        if (candidateIds.has(id)) ftScores.set(id, r.score / maxScore)
       }
     }
 
-    // Merge scores
-    const allIds = new Set(candidates.map(r => r.id))
-    const scored: { id: string; score: number }[] = []
-
-    for (const id of allIds) {
+    // Merge
+    const scored: { id: number; score: number }[] = []
+    for (const id of candidateIds) {
       const v = vectorScores.get(id) ?? 0
       const f = ftScores.get(id) ?? 0
       const score =
@@ -142,11 +176,11 @@ export class Pyxis {
   async queryDocs(text: string, limit?: number) { return this.query(text, { type: 'doc', limit }) }
   async queryCommands(text: string, limit?: number) { return this.query(text, { type: 'command', limit }) }
 
-  /** Remove all routes of a given file path (for incremental updates). */
   removeByPath(filePath: string): void {
-    const toRemove = this.routes.filter(r => r.path === filePath)
-    for (const r of toRemove) this.fts.remove(r)
-    this.routes = this.routes.filter(r => r.path !== filePath)
+    const toRemove = this.routes.filter(r => r.path === filePath || r.path.startsWith(filePath + ':'))
+    for (const r of toRemove) this.fts.remove({ ...r, id: String(r.id) } as any)
+    this.routes = this.routes.filter(r => !r.path.startsWith(filePath))
+    this._hnswDirty = true
   }
 
   get size(): number { return this.routes.length }

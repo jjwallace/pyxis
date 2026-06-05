@@ -39,11 +39,15 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^3.5.2",
-    "minisearch": "^7.1.1"
+    "minisearch": "^7.1.1",
+    "usearch": "^2.25.3"
   },
   "devDependencies": {
     "tsup": "^8.5.1",
-    "typescript": "^5.9.3",
+    "typescript": "5.9.3",
     "vitest": "^3.2.4"
-  }
+  },
+  "trustedDependencies": [
+    "tree-sitter-rust"
+  ]
 }

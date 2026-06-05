@@ -33,4 +33,13 @@ export interface IndexFilesOptions {
   parseFrontmatter?: boolean
 }
 
+export interface IndexCodeOptions {
+  /** Languages to parse (default: all supported) */
+  languages?: Array<'typescript' | 'javascript' | 'rust'>
+  /** Root dir for computing relative paths in route.path */
+  rootDir?: string
+  /** Extra metadata to attach to every extracted symbol */
+  metadata?: Record<string, unknown>
+}
+
 export type EmbedFn = (text: string) => Promise<number[]>

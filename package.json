@@ -13,13 +13,17 @@
       "require": "./dist/index.cjs"
     }
   },
+  "bin": {
+    "pyxis-mcp": "./dist/mcp-server.js"
+  },
   "files": ["dist"],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
     "test": "vitest",
     "test:run": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "mcp": "node dist/mcp-server.js"
   },
   "keywords": [
     "semantic-router",
@@ -39,6 +43,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^3.5.2",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "minisearch": "^7.1.1",
     "usearch": "^2.25.3"
   },
